@@ -6,21 +6,20 @@
 	This punycode codec is based upon the original implementation found in
 	$(LINK2 https://www.ietf.org/rfc/rfc3492.txt, RFC3492).
 
-	Authors: Shotaro Yamada (Sinkuu)
-	Date: February 27, 2017
-	License: $(LINK2 http://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
-	Standards: $(LINK2 https://www.ietf.org/rfc/rfc3492.txt, RFC3492)
-	Source: $(PHOBOSSRC std/net/_punycode.d)
-	Version: 1.0.1
+	License:	$(HTTP boost.org/LICENSE_1_0.txt, Boost License 1.0).
+	Authors: 	Shotaro Yamada (Sinkuu)
+	Source: 	$(PHOBOSSRC std/net/_punycode.d)
+	Standards: 	$(LINK2 https://www.ietf.org/rfc/rfc3492.txt, RFC3492)
 */
 module punycode;
 
-private import std.ascii : isASCII, isUpper, isLower, isDigit;
-private import std.conv : to;
-private import std.exception : enforce;
-private import std.traits : isSomeString;
-private import std.array : insertInPlace;
-private import std.algorithm.searching : all;
+import std.ascii : isASCII, isUpper, isLower, isDigit;
+import std.conv : to;
+import std.exception : enforce;
+import std.traits : isSomeString;
+import std.array : insertInPlace;
+import std.algorithm.searching : all;
+import core.checkedint;
 
 version (unittest)
 {
@@ -42,45 +41,48 @@ private immutable uint skew = 38;
 	Throws: PunycodeException if an internal error occured
 */
 S punyEncode(S)(in S str) @safe pure
-	if (isSomeString!S)
+if (isSomeString!S)
 {
 	import std.functional : not;
 	import std.algorithm.iteration : filter;
 	import std.array : array, appender, Appender;
 	import std.algorithm.sorting : sort;
+	
+	bool arithmeticOverflow;
 
 	static char encodeDigit(uint x)
 	{
 		if (x <= 25) return cast(char)('a' + x);
 		else if (x <= 35) return cast(char)('0' + x - 26);
-		assert(0);
+		assert(0, "Invalid digit to encode");
 	}
-
+	
+	enforce!PunycodeException(str.length <= uint.max);
 	dstring dstr = str.to!dstring;
 	auto ret = appender!S;
 	ret ~= dstr.filter!isASCII;
-	assert(ret.data.length <= uint.max);
-	uint handledLength = cast(uint)ret.data.length;
+	uint handledLength = cast(uint) ret.data.length;
 	immutable uint basicLength = handledLength;
 	if (handledLength > 0) ret ~= '-';
 	if (handledLength == dstr.length) return ret.data;
-	auto ms = (() @trusted => (cast(uint[])(dstr.filter!(not!isASCII).array)).sort!"a < b")();
+	
+	auto ascendingNonAsciiUints = (() @trusted => (cast(uint[]) (dstr.filter!(not!isASCII).array)).sort!"a < b")();
 	dchar n = initialN;
 	uint delta = 0;
 	uint bias = initialBias;
 	while (handledLength < dstr.length)
 	{
 		dchar m = void;
-		while ((m = ms.front) < n) ms.popFront();
-		enforce!PunycodeException((m - n) * (handledLength + 1) <= uint.max - delta, "Arithmetic overflow");
-		delta += (m - n) * (handledLength + 1);
+		while ((m = ascendingNonAsciiUints.front) < n) ascendingNonAsciiUints.popFront();
+		delta = addu (delta, (m - n) * (handledLength + 1), arithmeticOverflow);
+		enforce!PunycodeException(!arithmeticOverflow, "Arithmetic overflow");
 		n = m;
-		foreach (immutable(dchar) c; dstr)
+		foreach (c; dstr)
 		{
 			if (c < n)
 			{
-				enforce!PunycodeException(delta != uint.max, "Arithmetic overflow");
-				delta++;
+				delta = addu(delta, 1, arithmeticOverflow);
+				enforce!PunycodeException(!arithmeticOverflow, "Arithmetic overflow");
 			}
 			else if (c == n)
 			{
@@ -121,7 +123,7 @@ unittest
 		InvalidPunycodeException if an invalid Punycode string was passed
 */
 S punyDecode(S)(in S str) @safe pure
-	if (isSomeString!S)
+if (isSomeString!S)
 {
 	import std.string : lastIndexOf;
 	
@@ -132,41 +134,41 @@ S punyDecode(S)(in S str) @safe pure
 		if (c.isDigit) return c - '0' + 26;
 		throw new InvalidPunycodeException("Invalid Punycode");
 	}
+	
+	bool arithmeticOverflow;
+	
+	enforce!PunycodeException(str.length <= uint.max);
+	enforce!InvalidPunycodeException(str.all!isASCII, "Invalid Punycode");
 
-	dchar[] ret;
+	dchar[] ret; //REVIEW: Why is this not an Appender?
 	dchar n = initialN;
 	uint i = 0;
 	uint bias = initialBias;
 	dstring dstr = str.to!dstring;
-	assert(dstr.length <= uint.max);
-	immutable ptrdiff_t delimIdx = dstr.lastIndexOf('-');
-	if (delimIdx != -1)
-	{
-		enforce!InvalidPunycodeException(dstr[0 .. delimIdx].all!isASCII, "Invalid Punycode");
-		ret = dstr[0 .. delimIdx].dup;
-	}
-	ptrdiff_t idx = (delimIdx == -1 || delimIdx == 0) ? 0 : delimIdx + 1;
+	immutable ptrdiff_t delimiterIndex = dstr.lastIndexOf('-');
+	if (delimiterIndex != -1)
+		ret = dstr[0 .. delimiterIndex].dup;
+	ptrdiff_t idx = (delimiterIndex == -1 || delimiterIndex == 0) ? 0 : delimiterIndex + 1;
 	while (idx < dstr.length)
 	{
 		immutable uint oldi = i;
 		uint w = 1;
 		for (uint k = base;;k += base)
 		{
-			enforce!InvalidPunycodeException(idx < dstr.length);
-			immutable digit = decodeDigit(dstr[idx]);
+			enforce!InvalidPunycodeException(idx < dstr.length); //REVIEW: Can this be moved outside of the loop?
+			immutable uint digit = decodeDigit(dstr[idx]);
 			idx++;
-			enforce!PunycodeException(digit * w <= uint.max - i, "Arithmetic overflow");
-			i += digit * w;
+			i = addu(i, digit * w, arithmeticOverflow);
 			immutable t = k <= bias ? tmin :
 				k >= bias + tmax ? tmax : k - bias;
 			if (digit < t) break;
-			enforce!PunycodeException(w <= uint.max / (base - t), "Arithmetic overflow");
-			w *= base - t;
+			w = mulu(w, base - t, arithmeticOverflow);
+			enforce!PunycodeException(!arithmeticOverflow, "Arithmetic overflow");
 		}
-		enforce!PunycodeException(ret.length < uint.max-1, "Arithmetic overflow");
+		//enforce!PunycodeException(ret.length < uint.max-1, "Arithmetic overflow"); //REVIEW: I do not believe this is necessary.
 		bias = adaptBias(i - oldi, cast(uint) ret.length + 1, oldi == 0);
-		enforce!PunycodeException(i / (ret.length + 1) <= uint.max - n, "Arithmetic overflow");
-		n += i / (ret.length + 1);
+		n = addu(n, i / (ret.length + 1), arithmeticOverflow);
+		enforce!PunycodeException(!arithmeticOverflow, "Arithmetic overflow");
 		i %= ret.length + 1;
 		(() @trusted => ret.insertInPlace(i, n))();
 		i++;
@@ -218,7 +220,7 @@ class InvalidPunycodeException : PunycodeException
     mixin basicExceptionCtors;
 }
 
-private uint adaptBias(uint delta, in uint numpoints, in bool firsttime) @safe pure nothrow /+@nogc+/
+private uint adaptBias(uint delta, in uint numpoints, in bool firsttime) @safe @nogc pure nothrow
 {
 	uint k;
 	delta = firsttime ? delta / damp : delta / 2;

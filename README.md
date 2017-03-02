@@ -32,6 +32,15 @@ string decoded = punyDecode(encoded); // decoded is now "mañana" (UTF)
 assert(decoded == "mañana"); // passes
 ```
 
+### Rationale
+
+I am submitting this to the D Standard Library (Phobos) because because I believe it is a suitable candidate for a standard library module, on these grounds:
+
+1. It is critical to Uniform Resource Identifiers (URIs), which are ubiquitous, and are themselves critical for many programs.
+2. Phobos already has a module for Uniform Resource Identifiers: std.uri, yet no functionality for Punycode.
+3. It is critical to the Domain Name System (DNS), which is also ubiquitous, and itself critical for many programs.
+4. There are probably a few other ways that nobody has thought of for encoding and decoding Punycode, but only one way is specified clearly as an example implementation in the original RFC that specifies Punycode. This module, is based upon the original suggested implementation in RFC 3492, and there is little--if any--reason why a developer would prefer an alternative implementation.
+
 ### Future Intent
 
 I will be submitting this to the D Standard Library. If it does not get accepted
